@@ -2,6 +2,9 @@ name: build app and docker
 on:
   workflow_call:
     inputs:
+      credentials_json:
+        required: true
+        type: secret
       version:
         description: 'Version of the app'
         required: true
@@ -25,7 +28,7 @@ jobs:
     - name: setup GCP SA for docker login
       uses: google-github-actions/auth@v1
       with:
-        credentials_json: "${{ secrets.GCP_SA_KEY }}"
+        credentials_json: "${{ inputs.credentials_json }}"
         project_id: face-swipe-app
     - name: GCP Docker Login
       id: get-docker-token
