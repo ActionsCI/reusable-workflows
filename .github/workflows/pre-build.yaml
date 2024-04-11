@@ -1,0 +1,24 @@
+name: pre-build Compute Version
+on:
+  workflow_call:
+    outputs:
+      version:
+        description: 'The computed version'
+        value: ${{ jobs.pre-build.outputs.version }}
+jobs:
+  pre-build:
+    outputs:
+      version: ${{ steps.compute-version.outputs.version }}
+    runs-on: ubuntu-20.04 
+    steps:
+      - name: Checkout shallow
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Compute Version
+        id: compute-version
+        uses: ActionsCI/compute-semver@main
+      - name: Set Outputs
+        run: echo "VERSION=${{ steps.compute-version.outputs.version }}" >> $GITHUB_ENV
+      - name: Print Version
+        run: echo "Version is ${{ steps.compute-version.outputs.version }}"

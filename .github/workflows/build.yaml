@@ -1,0 +1,40 @@
+name: build app and docker
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: 'Version of the app'
+        required: true
+        type: string
+      registry_url:
+        description: 'Registry URL'
+        required: false
+        type: string
+        default: 'gcr.io/face-swipe-app'
+      docker_image:
+        description: 'Docker image name'
+        required: false
+        type: string
+        default: 'face-swipe-app'
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    - name: setup GCP SA for docker login
+      uses: google-github-actions/auth@v1
+      with:
+        credentials_json: "${{ secrets.GCP_SA_KEY }}"
+        project_id: face-swipe-app
+    - name: GCP Docker Login
+      id: get-docker-token
+      run: gcloud auth configure-docker
+
+    - name: Build and Push Docker Image
+      uses: ActionsCI/docker-build-push@main
+      with:
+        version: "${{ inputs.version }}"
+        image_name: "${{ inputs.docker_image }}"
+        registry_url: "${{ inputs.registry_url }}"
+        # registry_token: ${{ steps.get-docker-token.outputs.DOCKER_TOKEN }}
