@@ -21,4 +21,4 @@ jobs:
       - name: Set Outputs
         run: echo "VERSION=${{ steps.compute-version.outputs.version }}" >> $GITHUB_ENV
       - name: Print Version
-        run: echo "Version is ${{ steps.compute-version.outputs.version }}"
+        run: echo "Version is ${{ steps.compute-version.outputs.version }}"      

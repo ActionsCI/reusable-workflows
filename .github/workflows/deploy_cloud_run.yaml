@@ -1,9 +1,6 @@
 name: Deploy
 on:
   workflow_call:
-    secrets:
-      GCP_CLOUDRUN_SA_KEY:
-        required: true
     inputs:
       version:
         description: 'Version of the app'

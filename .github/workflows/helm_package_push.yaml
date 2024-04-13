@@ -1,0 +1,57 @@
+name: Package Helm Chart and Push
+
+on:
+  workflow_call:
+    inputs:
+      helm_chart_directory:
+        description: 'The directory of the Helm chart'
+        required: true
+        type: string
+      helm_repo_username:
+        description: 'The username for the Helm repository'
+        required: true
+        type: string
+      helm_repo_password:
+        description: 'The password for the Helm repository'
+        required: true
+        type: string
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      # step to check if the file .github/workflows/config.json exists and runs if true
+      - name: Check if config.json exists
+        id: config
+        run: |
+          if [ -f .github/workflows/config.json ]; then
+            echo "config=$(cat .github/workflows/config.json)" >> $GITHUB_ENV
+            #check the env config for a value `env.config.helm.chart_dir` and if no value is found use the input.helm_chart_dir value. start with DEFAULT_HELM_CHART_DIRECTORY. make it a 1 line
+            echo "DEFAULT_HELM_CHART_DIR=${{ env.config.helm.chart_directory }}:-${{ inputs.helm_chart_directory }} }}" >> $GITHUB_ENV
+            # placeholder for more values to load from config.json
+          else
+            echo "No Config file found!"
+          fi
+      - name: Helm registry login
+        env:
+          HELM_CHART_DIRECTORY: ${{ env.DEFAULT_HELM_CHART_DIR }}
+          HELM_REPO_USERNAME: ${{ inputs.HELM_REPO_USERNAME }}
+          HELM_REPO_PASSWORD: ${{ inputs.HELM_REPO_PASSWORD }}
+        run: |
+          echo "${{ inputs.HELM_REPO_PASSWORD }}" | helm registry login -u ${{ inputs.HELM_REPO_USERNAME }} --password-stdin
+      - name: Package Helm chart
+        env:
+            HELM_CHART_DIRECTORY: ${{ env.DEFAULT_HELM_CHART_DIR }}
+            HELM_REPO_USERNAME: ${{ inputs.HELM_REPO_USERNAME }}
+            HELM_REPO_PASSWORD: ${{ inputs.HELM_REPO_PASSWORD }}
+        run: |
+          #### helm dependancy build, package and push
+          cd ${DEFAULT_HELM_CHART_DIR}
+          CHART_NAME=$(yq e .name Chart.yaml)
+
+          helm dependency build ${DEFAULT_HELM_CHART_DIR}
+          helm package ${DEFAULT_HELM_CHART_DIR}
+          helm push ${DEFAULT_HELM_CHART_DIR}-*.tgz ${CHART_NAME} --force --username ${HELM_REPO_USERNAME} --password ${HELM_REPO_PASSWORD}
