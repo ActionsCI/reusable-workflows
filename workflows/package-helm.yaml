@@ -1,0 +1,236 @@
+name: Package and Publish Helm Chart (Reusable)
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: 'The version to use for both chart version and appVersion'
+        required: true
+        type: string
+      ecr_url:
+        description: 'ECR URL for Helm chart repository'
+        required: true
+        type: string
+      ecr_region:
+        description: 'AWS region for ECR'
+        required: true
+        type: string
+      role_arn:
+        description: 'AWS IAM role ARN for OIDC authentication'
+        required: true
+        type: string
+      chart_path:
+        description: 'Path to Helm chart directory'
+        required: true
+        type: string
+      repository_name:
+        description: 'Helm chart repository name'
+        required: true
+        type: string
+      services_json:
+        description: 'JSON array of service keys to update (optional)'
+        required: false
+        type: string
+        default: ''
+      service_repo_map_json:
+        description: 'JSON object mapping service key to repository_name (optional)'
+        required: false
+        type: string
+        default: ''
+      service_alias_map_json:
+        description: 'JSON object mapping service key to chart alias (optional)'
+        required: false
+        type: string
+        default: ''
+      service_registry_map_json:
+        description: 'JSON object mapping service key to registry url (optional)'
+        required: false
+        type: string
+        default: ''
+    outputs:
+      values_updates_json:
+        description: 'JSON object of alias -> {registry,name,tag} extracted from values.yaml after packaging'
+        value: ${{ jobs.package-helm.outputs.values_updates_json }}
+      values_file_path:
+        description: 'Path to values.yaml used during packaging'
+        value: ${{ jobs.package-helm.outputs.values_file_path }}
+    secrets:
+      inherit: {}
+jobs:
+  package-helm:
+    name: Package and Publish Helm Chart
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: write
+    outputs:
+      values_updates_json: ${{ steps.export-values.outputs.values_updates_json }}
+      values_file_path: ${{ steps.export-values.outputs.values_file_path }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.14.4
+
+      - name: Set up AWS credentials for Helm push
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.role_arn }}
+          aws-region: ${{ inputs.ecr_region }}
+
+      - name: Login to ECR for Helm
+        run: |
+          aws ecr get-login-password --region ${{ inputs.ecr_region }} | \
+            helm registry login --username AWS --password-stdin ${{ inputs.ecr_url }}
+
+      - name: Package and publish the helm chart
+        working-directory: ${{ inputs.chart_path }}
+        env:
+          VERSION: ${{ inputs.version }}
+          ECR_URL: ${{ inputs.ecr_url }}
+          HELM_REPO: ${{ inputs.repository_name }}
+          CHART_PATH: ${{ inputs.chart_path }}
+          SERVICES_JSON: '${{ inputs.services_json }}'
+          SERVICE_REPO_MAP_JSON: '${{ inputs.service_repo_map_json }}'
+          SERVICE_ALIAS_MAP_JSON: '${{ inputs.service_alias_map_json }}'
+          SERVICE_REGISTRY_MAP_JSON: '${{ inputs.service_registry_map_json }}'
+        run: |
+          cd "${GITHUB_WORKSPACE}/${CHART_PATH}"
+          rm -f *.tgz
+          helm dependency update .
+
+          echo "--- values.yaml (before) ---"
+          cat values.yaml || true
+          echo "---------------------------"
+
+          # If services_json provided, update repositories in values.yaml
+          if [[ -n "$SERVICES_JSON" && "$SERVICES_JSON" != "null" ]]; then
+            echo "Services JSON: $SERVICES_JSON"
+            echo "Repo map JSON: $SERVICE_REPO_MAP_JSON"
+            echo "Alias map JSON: $SERVICE_ALIAS_MAP_JSON"
+            echo "Registry map JSON: $SERVICE_REGISTRY_MAP_JSON"
+            
+            services=$(echo "$SERVICES_JSON" | jq -r '.[]?' 2>/dev/null || echo "")
+            if [[ -n "$services" ]]; then
+              YQ_UPDATES=""
+              while IFS= read -r service; do
+                if [[ -n "$service" ]]; then
+                  repo_name=$(echo "$SERVICE_REPO_MAP_JSON" | jq -r --arg s "$service" '.[$s] // $s' 2>/dev/null)
+                  alias=$(echo "$SERVICE_ALIAS_MAP_JSON" | jq -r --arg s "$service" '.[$s] // empty' 2>/dev/null)
+                  if [[ -z "$alias" ]]; then alias=${service##*-}; fi
+                  registry=$(echo "$SERVICE_REGISTRY_MAP_JSON" | jq -r --arg s "$service" '.[$s] // empty' 2>/dev/null)
+                  if [[ -z "$registry" ]]; then registry="$ECR_URL"; fi
+                  # Set values under the subchart alias key: <alias>.service.image.{registry,name,tag}
+                  YQ_UPDATES="$YQ_UPDATES | .\"$alias\".service.image.registry = \"${registry}\" | .\"$alias\".service.image.name = \"${repo_name}\" | .\"$alias\".service.image.tag = \"${VERSION}\""
+                fi
+              done <<< "$services"
+              if [[ -n "$YQ_UPDATES" ]]; then
+                YQ_UPDATES=${YQ_UPDATES:2}
+                echo "Updating values.yaml with repositories and tags (by alias): $YQ_UPDATES"
+                yq eval "$YQ_UPDATES" -i values.yaml
+              fi
+
+              echo "--- values.yaml (after) ---"
+              cat values.yaml
+              echo "--------------------------"
+
+              echo "--- Per-alias image values (after) ---"
+              while IFS= read -r service; do
+                if [[ -n "$service" ]]; then
+                  alias=$(echo "$SERVICE_ALIAS_MAP_JSON" | jq -r --arg s "$service" '.[$s] // empty' 2>/dev/null)
+                  if [[ -z "$alias" ]]; then alias=${service##*-}; fi
+                  echo "Alias: $alias (from service: $service)"
+                  yq eval ".\"$alias\".service.image" values.yaml || true
+                fi
+              done <<< "$services"
+              echo "----------------------------------------"
+            fi
+          fi
+
+          echo "Packaging chart with version ${VERSION}"
+          helm package . \
+            --app-version "${VERSION}" \
+            --version "${VERSION}"
+
+          echo "Pushing Helm chart to: oci://${ECR_URL}"
+          echo "Chart package: ${HELM_REPO}-${VERSION}.tgz"
+          tar -tzf ${HELM_REPO}-${VERSION}.tgz
+          helm push ${HELM_REPO}-${VERSION}.tgz oci://${ECR_URL}
+
+      - name: Export values updated
+        id: export-values
+        working-directory: ${{ inputs.chart_path }}
+        env:
+          SERVICES_JSON: '${{ inputs.services_json }}'
+          SERVICE_ALIAS_MAP_JSON: '${{ inputs.service_alias_map_json }}'
+        run: |
+          cd "${GITHUB_WORKSPACE}/${{ inputs.chart_path }}"
+          values_file="${GITHUB_WORKSPACE}/${{ inputs.chart_path }}/values.yaml"
+          echo "values_file_path=$values_file" >> $GITHUB_OUTPUT
+
+          if [[ -z "$SERVICES_JSON" || "$SERVICES_JSON" == "null" ]]; then
+            # Nothing to extract
+            echo 'values_updates_json={}' >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          services=$(echo "$SERVICES_JSON" | jq -r '.[]?' 2>/dev/null || echo "")
+          if [[ -z "$services" ]]; then
+            echo 'values_updates_json={}' >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          tmp='{}'
+          while IFS= read -r service; do
+            [[ -z "$service" ]] && continue
+            alias=$(echo "$SERVICE_ALIAS_MAP_JSON" | jq -r --arg s "$service" '.[$s] // empty' 2>/dev/null)
+            if [[ -z "$alias" ]]; then alias=${service##*-}; fi
+            reg=$(yq -r ".\"$alias\".service.image.registry // \"\"" values.yaml)
+            name=$(yq -r ".\"$alias\".service.image.name // \"\"" values.yaml)
+            tag=$(yq -r ".\"$alias\".service.image.tag // \"\"" values.yaml)
+            obj=$(jq -n --arg r "$reg" --arg n "$name" --arg t "$tag" '{registry:$r,name:$n,tag:$t}')
+            tmp=$(jq -c --arg a "$alias" --argjson o "$obj" '. + {($a): $o}' <<< "$tmp")
+          done <<< "$services"
+
+          echo "values_updates_json=$tmp" >> $GITHUB_OUTPUT
+
+      - name: Tag source with version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if git rev-parse -q --verify "refs/tags/${VERSION}" >/dev/null; then
+            echo "Tag ${VERSION} already exists. Skipping."
+            exit 0
+          fi
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git tag -a "${VERSION}" -m "Release ${VERSION}"
+          git push origin "refs/tags/${VERSION}"
+
+      - name: Helm Package Summary
+        run: |
+          VALUES_PATH="${{ steps.export-values.outputs.values_file_path }}"
+          # Normalize path for readability if realpath exists
+          if command -v realpath >/dev/null 2>&1; then
+            VALUES_PATH=$(realpath "$VALUES_PATH" 2>/dev/null || echo "$VALUES_PATH")
+          fi
+          echo "## Helm Chart Summary" >> $GITHUB_STEP_SUMMARY
+          echo "**Chart:** \`${{ inputs.repository_name }}-${{ inputs.version }}.tgz\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Repository:** \`${{ inputs.ecr_url }}/${{ inputs.repository_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** \`${{ inputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Values file:** \`$VALUES_PATH\`" >> $GITHUB_STEP_SUMMARY
+          # Render image defaults as YAML for readability
+          JSON='${{ steps.export-values.outputs.values_updates_json }}'
+          if [ -n "$JSON" ] && [ "$JSON" != "{}" ]; then
+            echo "**Image defaults (by alias):**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo '```yaml' >> $GITHUB_STEP_SUMMARY
+            CONTENT=$(echo "$JSON" | jq -r 'to_entries | .[] | "\(.key):\n  registry: \(.value.registry)\n  name: \(.value.name)\n  tag: \(.value.tag)"')
+            printf "%s\n" "$CONTENT" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "**Status:** ✅ Packaged and pushed successfully" >> $GITHUB_STEP_SUMMARY 

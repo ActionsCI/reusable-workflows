@@ -1,0 +1,146 @@
+name: __ Service Deployment (reusable workflow)
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        description: Name of a service to be deployed
+        required: true
+        type: string
+      helmTag:
+        description: Helm tag to be deployed
+        required: true
+        type: string
+      env:
+        description: Environment to deploy the service to
+        required: true
+        type: string
+    secrets:
+      GH_TOKEN:
+        required: true
+
+jobs:
+  service-deployment:
+    environment: ${{ inputs.env }}
+    concurrency: deployment-${{ inputs.service }}-${{ inputs.env }}
+    runs-on: ubuntu-24.04
+    env:
+      FORCE_COLOR: 1
+    steps:
+      - name: Checkout gitops repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_TOKEN }}
+          repository: BoltApp/gitops
+          fetch-depth: 0
+      - name: Update the tag (idempotent, with summary)
+        run: |
+          npx zx <<'EOF'
+          try {
+            $.verbose = true
+            $.sync = true
+
+            const fs = await import('node:fs')
+
+            const envName = "${{ inputs.env }}"
+            const serviceName = "${{ inputs.service }}"
+            const requestedVersion = "${{ inputs.helmTag }}"
+            const chartYaml = `service/${serviceName}/${envName}/Chart.yaml`
+
+            const summary = process.env.GITHUB_STEP_SUMMARY
+            const writeSummary = (statusLine, extras = []) => {
+              if (!summary) return
+              const lines = [
+                '## GitOps Deployment Summary',
+                `**Service:** \`${serviceName}\``,
+                `**Environment:** \`${envName}\``,
+                `**GitOps Path:** \`${chartYaml}\``,
+                statusLine,
+                ...extras,
+                ''
+              ]
+              fs.appendFileSync(summary, lines.join('\n'))
+            }
+
+            const readVersion = async () => {
+              try {
+                return (await $`yq -r '.dependencies[] | select(.alias=="service") | .version' ${chartYaml}`).stdout.trim()
+              } catch { return '' }
+            }
+
+            const aliasExists = async () => {
+              try {
+                const out = (await $`yq -r '[.dependencies[] | select(.alias=="service")] | length' ${chartYaml}`).stdout.trim()
+                const n = parseInt(out, 10)
+                return Number.isFinite(n) && n > 0
+              } catch { return false }
+            }
+
+            if (!fs.existsSync(chartYaml)) {
+              console.warn(chalk.yellow(`GitOps path not found: ${chartYaml}.`))
+              writeSummary('**Status:** ⚠️ Skipped (GitOps path missing)')
+              process.exit(0)
+            }
+
+            if (!(await aliasExists())) {
+              console.warn(chalk.yellow(`No dependency with alias 'service' found in ${chartYaml}.`))
+              writeSummary("**Status:** ⚠️ Skipped (no 'service' dependency in Chart.yaml)")
+              process.exit(0)
+            }
+
+            const currentVersion = await readVersion()
+            if (currentVersion === requestedVersion) {
+              writeSummary('**Status:** ✅ Version confirmed (no commit needed)', [
+                `**Old version:** \`${currentVersion}\``,
+                `**New version:** \`${requestedVersion}\``
+              ])
+              process.exit(0)
+            }
+
+            // Write requested version (in-place)
+            $`yq '(.dependencies[] | select(.alias == "service")).version = "${requestedVersion}"' -i "${chartYaml}"`
+
+            // Verify the file now contains the requested version
+            const newVersion = await readVersion()
+            if (newVersion !== requestedVersion) {
+              writeSummary('**Status:** ⚠️ Requested version not applied', [
+                `**Old version:** \`${currentVersion}\``,
+                `**Requested:** \`${requestedVersion}\``,
+                `**Observed:** \`${newVersion}\``
+              ])
+              process.exit(1)
+            }
+
+            // OG pattern: ensure there ARE changes to commit; if not, treat as confirmed
+            try {
+              // Negated exit-code: throws when no changes
+              $`! git diff --exit-code`
+            } catch {
+              writeSummary('**Status:** ✅ Version confirmed (no commit needed)', [
+                `**Old version:** \`${currentVersion}\``,
+                `**New version:** \`${newVersion}\``
+              ])
+              process.exit(0)
+            }
+
+            // Commit and push changes
+            $`git config --global user.name "BOLT-CI"`
+            $`git config --global user.email "platforms@bolt.com"`
+            $`git add ${chartYaml}`
+            $`git commit -m"CD - Deploy ${serviceName}:${requestedVersion} to ${envName}"`
+
+            await retry(5, () => {
+              try { $`git push` } catch { $`git pull --rebase`; throw new Error('Push failed.') }
+            })
+
+            writeSummary('**Status:** ✅ Deployed successfully', [
+              `**Old version:** \`${currentVersion}\``,
+              `**New version:** \`${newVersion}\``
+            ])
+          } catch (error) {
+            console.error(chalk.red.bold(`${error}`));
+            process.exit(1)
+          }
+          EOF
+
+    # No separate summary step to avoid duplication

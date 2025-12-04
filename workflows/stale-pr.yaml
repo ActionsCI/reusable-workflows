@@ -1,0 +1,26 @@
+name: Mark and close stale pull requests (reusable workflow)
+
+on:
+  workflow_call:
+    inputs:
+      debug-only:
+        description: 'Run the processor in debug mode without actually performing any operations on live PRs.'
+        type: string
+        default: "false"
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      issues: write
+
+    steps:
+    - uses: actions/stale@v9
+      with:
+        days-before-issue-stale: -1
+        days-before-stale: 14
+        stale-pr-message: "This PR is stale because it has been open 14 days with no activity. Remove `stale` label or comment. Otherwise this will be closed in 7 days."
+        close-pr-message: "This PR was closed because it has been inactive since being marked as stale."
+        operations-per-run: 500
+        debug-only: ${{ inputs.debug-only }}

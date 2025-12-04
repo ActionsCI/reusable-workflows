@@ -1,0 +1,84 @@
+name: __ Prepare promotion (reusable workflow)
+
+on:
+  workflow_call:
+    inputs:
+      source_env:
+        description: Source environment
+        required: true
+        type: string
+      target_env:
+        description: Target environment
+        required: true
+        type: string
+      service_name:
+        description: Service name
+        required: true
+        type: string
+    secrets:
+      GH_TOKEN:
+        description: Gitops access token
+        required: true
+    outputs:
+      new_service_version:
+        value: ${{ jobs.determine-service-version.outputs.new_service_version }}
+      target_env:
+        value: ${{ jobs.determine-service-version.outputs.target_env }}
+      service_name:
+        value: ${{ jobs.determine-service-version.outputs.service_name }}
+
+jobs:
+  determine-service-version:
+    runs-on: ubuntu-24.04
+    outputs:
+      service_name: ${{ steps.service_versions.outputs.service_name }}
+      target_env: ${{ steps.service_versions.outputs.target_env }}
+      new_service_version: ${{ steps.service_versions.outputs.source_env_version }}
+      old_service_version: ${{ steps.service_versions.outputs.target_env_version }}
+    steps:
+      - name: Checkout - Gitops
+        uses: actions/checkout@v4
+        with:
+          repository: BoltApp/gitops
+          token: ${{ secrets.GH_TOKEN }}
+      - name: Determine service versions
+        id: service_versions
+        run: | # js
+          npx zx <<-'EOF'
+          try {
+            $.verbose = true
+            $.sync = true
+
+            function determineVersion(serviceName, envName) {
+              const chartYaml = `service/${serviceName}/${envName}/Chart.yaml`
+              const appVersion = $`yq --exit-status '(.dependencies[] | select(.alias == "service")).version' "${chartYaml}"`
+              return appVersion
+            }
+
+            const sourceEnv = "${{ inputs.source_env }}"
+            const targetEnv = "${{ inputs.target_env }}"
+            const serviceName = "${{ inputs.service_name }}"
+
+            const sourceEnvVersion = determineVersion(serviceName, sourceEnv)
+            const targetEnvVersion = determineVersion(serviceName, targetEnv)
+
+            $`echo "service_name=${serviceName}" >> $GITHUB_OUTPUT`
+            $`echo "source_env=${sourceEnv}" >> $GITHUB_OUTPUT`
+            $`echo "source_env_version=${sourceEnvVersion}" >> $GITHUB_OUTPUT`
+            $`echo "target_env=${targetEnv}" >> $GITHUB_OUTPUT`
+            $`echo "target_env_version=${targetEnvVersion}" >> $GITHUB_OUTPUT`
+            $`cat $GITHUB_OUTPUT`
+
+          } catch (error) {
+            console.error(chalk.red.bold(`Error: ${error.message}`))
+            process.exit(1)
+          }
+          EOF
+
+  generate-changelog:
+    needs:
+      - determine-service-version
+    uses: BoltApp/actions-reusable-workflows/.github/workflows/generate-changelog.yaml@v1
+    with:
+      old_version: ${{ needs.determine-service-version.outputs.old_service_version }}
+      new_version: ${{ needs.determine-service-version.outputs.new_service_version }}

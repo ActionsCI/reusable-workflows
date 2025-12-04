@@ -1,0 +1,79 @@
+name: __ Generate changelog (reusable workflow)
+
+on:
+  workflow_call:
+    inputs:
+      old_version:
+        description: Old version
+        required: true
+        type: string
+      new_version:
+        description: New version
+        required: true
+        type: string
+
+jobs:
+  generate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Generate changelog
+        env:
+          FORCE_COLOR: 1
+        run: | # js
+          npx zx <<-'EOF'
+          try {
+            $.verbose = true
+            $.sync = true
+            const $nt = $({ nothrow: true })
+
+            const newVersion = "${{ inputs.new_version }}"
+            const oldVersion = "${{ inputs.old_version }}"
+            let ancestorRef = ""
+            let descendantRef = ""
+            let changelog_md = ""
+            let generate_changelog = true
+
+            if ( $nt`git merge-base --is-ancestor ${oldVersion} ${newVersion}`.exitCode == 0 ) {
+              changelog_md += `### Changes to be deployed with a \`${oldVersion} -> ${newVersion}\` promotion`
+              ancestorRef = oldVersion
+              descendantRef = newVersion
+            } else if ( $nt`git merge-base --is-ancestor ${newVersion} ${oldVersion}`.exitCode == 0 ) {
+              changelog_md += `### 🚨 <span style="color:white; background-color:red;">Changes to be reverted with a \`${oldVersion} -> ${newVersion}\` rollback</span> 🚨`
+              console.log(
+                `::warning title=It looks like a rollback::Double check the changelog!`
+              )
+              ancestorRef = newVersion
+              descendantRef = oldVersion
+            } else {
+              changelog_md += `### 🚨 <span style="color:white; background-color:red;">Versions\`${oldVersion}\` and \`${newVersion}\` are unrelated</span> 🚨
+          *It's not a normal situation!*
+
+          Make sure to double check what's going to be released/reverted and decide what to do next!`
+              console.log(
+                `::warning title=Versions\`${oldVersion}\` and \`${newVersion}\` are unrelated::It's not a normal situation! Make sure to double check what's going to be released/reverted and decide what to do next!`
+              )
+              generate_changelog = false
+            }
+
+            if (generate_changelog) {
+              changelog_md += `
+          |Author|Commits count|
+          |---|:---:|
+          `
+              changelog_md += $`git log --format="%an (%al)" ${ancestorRef}..${descendantRef} | sed -r 's/\\([0-9]{5,}\\+(\\S+)\\)/(\\1)/' | sort | uniq -c | sort -r | sed -r 's/^\\s*([0-9]+)\\s+(\\S+.*)\$/|\\2|\\1|/'`
+              changelog_md += `
+
+          |Commit subject|Author|Commit|
+          |---|:---:|:---:|
+          `
+              changelog_md += $`git log --reverse --format="|%s|%an (%al)|[\`\`%h\`\`](${{ github.server_url }}/${{ github.repository }}/commit/%H)|" ${ancestorRef}..${descendantRef} | sed -r 's/\\([0-9]{5,}\\+(\\S+)\\)/(\\1)/'`
+            }
+            $`echo ${changelog_md} > $GITHUB_STEP_SUMMARY`
+          } catch (error) {
+            console.error(chalk.red.bold(`Error: ${error.message}`))
+            process.exit(1)
+          }
+          EOF
