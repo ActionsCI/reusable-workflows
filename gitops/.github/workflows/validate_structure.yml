@@ -1,0 +1,20 @@
+name: Validate Repo Structure
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Validate Directory Structure
+        run: |
+          ./.github/scripts/validate.sh

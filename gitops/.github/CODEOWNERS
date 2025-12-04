@@ -1,0 +1,10 @@
+######################################################
+# WARNING! Inline comments are not supported
+# in this file and can void the pattern.
+# Please add comments on separate lines.
+######################################################
+
+* @App/platforms
+
+service/eco-backend/dev @ACTIONSCI/developers
+service/eco-backend/prod @ACTIONSCI/admins
