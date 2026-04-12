@@ -1,0 +1,21 @@
+name: pre-build (Reusable workflow)
+on:
+  workflow_call:
+    outputs:
+      version:
+        description: 'The computed version'
+        value: ${{ jobs.pre-build.outputs.version }}
+jobs:
+  pre-build:
+    outputs:
+      version: ${{ steps.compute-version.outputs.version }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compute version
+        id: compute-version
+        run: |
+          version="$(git rev-parse --short HEAD)-${GITHUB_RUN_ID:-github_run_id}-${GITHUB_RUN_ATTEMPT:-github_run_attempt}"
+          VER_STRING="version=${version}"
+          echo "${VER_STRING}" >> "${GITHUB_OUTPUT}"
+          echo "Computed version string: ${version}"

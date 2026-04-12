@@ -1,0 +1,23 @@
+name: Success check (reusable workflow)
+
+on:
+  workflow_call:
+    inputs:
+      jobs:
+        description: List of jobs to check
+        type: string
+        required: true
+
+jobs:
+  success-check:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: |
+          echo '==== Job Results ===='
+          jq '.' << EOF
+          ${{ inputs.jobs }}
+          EOF
+          echo '==== Checking for failures, cancellations, or skipped jobs ===='
+          jq 'to_entries | map(select(.value.result == "failure" or .value.result == "cancelled")) | if length > 0 then error("At least one job failed or was cancelled.") else halt end' << EOF
+          ${{ inputs.jobs }}
+          EOF
