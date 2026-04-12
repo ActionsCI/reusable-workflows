@@ -1,0 +1,113 @@
+name: Build EKS App (Reusable)
+on:
+  workflow_call:
+    inputs:
+      env:
+        description: 'Requested environment to deploy to (dev, staging, production)'
+        required: false
+        type: string
+      ref:
+        description: 'Git ref (branch or tag) to deploy'
+        required: false
+        type: string
+    secrets:
+      inherit: {}
+  workflow_dispatch:
+    inputs:
+      env:
+        description: |
+          Environment to deploy to.
+          Mappings:
+            dev
+            staging
+            sandbox
+            production
+        required: true
+        type: choice
+        options:
+          - dev
+          - sandbox
+          - staging
+          - production
+        default: dev
+      ref:
+        description: 'Git ref (branch or tag) to deploy'
+        required: false
+        type: string
+        default: 'main'
+
+jobs:
+  pre-build:
+    uses: actionsci/reusable-workflows/.github/workflows/pre-build.yaml
+    with:
+      env: ${{ github.event.inputs.env || '' }}
+      ref: ${{ github.event.inputs.ref || '' }}
+
+  docker-build-push:
+    name: Docker Build and Push
+    needs:
+      - pre-build
+    strategy:
+      matrix:
+        include: ${{ fromJson(needs.pre-build.outputs.services_build_matrix) }}
+    uses: actionsci/reusable-workflows/.github/workflows/docker-build-push.yaml
+    with:
+      service_name: ${{ matrix.service }}
+      image_tag: ${{ needs.pre-build.outputs.version_oci }}
+      ecr_url: ${{ needs.pre-build.outputs.ecr_url }}
+      ecr_region: ${{ needs.pre-build.outputs.ecr_region }}
+      role_arn: ${{ needs.pre-build.outputs.role_arn }}
+      repository_name: ${{ matrix.repository_name }}
+      dockerfile: ${{ matrix.dockerfile }}
+      context: ${{ matrix.context }}
+      push: ${{ matrix.push }}
+      build_args: ${{ matrix.build_args }}
+    secrets:
+      GH_TOKEN: ${{ secrets.ACTIONS_CI_GITHUB_TOKEN }}
+
+  helm-package-push:
+    name: Package and Publish Helm Chart
+    needs:
+      - pre-build
+      - docker-build-push
+    uses:  actionsci/reusable-workflows/.github/workflows/package-helm.yaml
+    with:
+      version: ${{ needs.pre-build.outputs.version_oci }}
+      ecr_url: ${{ needs.pre-build.outputs.ecr_url }}
+      ecr_region: ${{ needs.pre-build.outputs.ecr_region }}
+      role_arn: ${{ needs.pre-build.outputs.role_arn }}
+      chart_path: ${{ needs.pre-build.outputs.chart_path }}
+      repository_name: ${{ needs.pre-build.outputs.repository_name }}
+      services_json: ${{ needs.pre-build.outputs.services_json }}
+      service_repo_map_json: ${{ needs.pre-build.outputs.service_repo_map_json }}
+      service_alias_map_json: ${{ needs.pre-build.outputs.service_alias_map_json }}
+      service_registry_map_json: ${{ needs.pre-build.outputs.service_registry_map_json }}
+
+  deploy:
+    name: Deploy
+    needs:
+      - pre-build
+      - docker-build-push
+      - helm-package-push
+    if: ${{ needs.pre-build.outputs.deploy_envs_json != '[]' }}
+    strategy:
+      matrix:
+        env: ${{ fromJson(needs.pre-build.outputs.deploy_envs_json) }}
+    uses: actionsci/reusable-workflows/.github/workflows/service-deployment-gitops.yaml
+    with:
+      service: ${{ needs.pre-build.outputs.release_name }}
+      helmTag: ${{ needs.pre-build.outputs.version_oci }}
+      env: ${{ matrix.env }}
+    secrets:
+      GH_TOKEN: ${{ secrets.ACTIONS_CI_GITHUB_TOKEN }}
+
+  success-check:
+    if: ${{ always() }}
+    needs:
+      - pre-build
+      - docker-build-push
+      - helm-package-push
+      - deploy
+    uses: actionsci/actions-reusable-workflows/.github/workflows/success-check.yaml
+    with:
+      jobs: ${{ toJson(needs) }}

@@ -1,0 +1,367 @@
+name: pre-build (Reusable workflow)
+on:
+  workflow_call:
+    inputs:
+      debug:
+        description: 'Enable debug output steps'
+        required: false
+        default: false
+        type: boolean
+      env:
+        description: 'Requested environment to deploy to (dev, staging, prod)'
+        required: false
+        type: string
+      ref:
+        description: 'Git ref (branch or tag) to deploy'
+        required: false
+        type: string
+    outputs:
+      version:
+        description: 'The computed version'
+        value: ${{ jobs.pre-build.outputs.version }}
+      version_oci:
+        description: 'Lowercased version safe for OCI tags'
+        value: ${{ jobs.pre-build.outputs.version_oci }}
+      components_json:
+        description: 'Full cicd.yaml as JSON string'
+        value: ${{ jobs.pre-build.outputs.components_json }}
+      deploy_env:
+        description: 'The actual environment to deploy to'
+        value: ${{ jobs.pre-build.outputs.deploy_env }}
+      services_matrix:
+        description: 'Matrix of services to build (excluding helm)'
+        value: ${{ jobs.pre-build.outputs.services_matrix }}
+      services_json:
+        description: 'JSON array of service keys'
+        value: ${{ jobs.pre-build.outputs.services_json }}
+      service_repo_map_json:
+        description: 'JSON object mapping service key to repository_name'
+        value: ${{ jobs.pre-build.outputs.service_repo_map_json }}
+      service_alias_map_json:
+        description: 'JSON object mapping service key to helm alias'
+        value: ${{ jobs.pre-build.outputs.service_alias_map_json }}
+      service_registry_map_json:
+        description: 'JSON object mapping service key to registry URL'
+        value: ${{ jobs.pre-build.outputs.service_registry_map_json }}
+      ecr_url:
+        description: 'Global ECR URL from config.helm.aws.ecr_url'
+        value: ${{ jobs.pre-build.outputs.ecr_url }}
+      ecr_region:
+        description: 'Global ECR region'
+        value: ${{ jobs.pre-build.outputs.ecr_region }}
+      role_arn:
+        description: 'Global AWS role ARN for OIDC'
+        value: ${{ jobs.pre-build.outputs.role_arn }}
+      chart_path:
+        description: 'Helm chart path'
+        value: ${{ jobs.pre-build.outputs.chart_path }}
+      repository_name:
+        description: 'Helm repository (chart) name'
+        value: ${{ jobs.pre-build.outputs.repository_name }}
+      release_name:
+        description: 'Helm release name used for GitOps path'
+        value: ${{ jobs.pre-build.outputs.release_name }}
+      release_branch:
+        description: 'Configured release branch for production'
+        value: ${{ jobs.pre-build.outputs.release_branch }}
+      dev_enabled:
+        description: 'Dev deployment enabled flag'
+        value: ${{ jobs.pre-build.outputs.dev_enabled }}
+      staging_enabled:
+        description: 'Staging deployment enabled flag'
+        value: ${{ jobs.pre-build.outputs.staging_enabled }}
+      sandbox_enabled:
+        description: 'Sandbox deployment enabled flag'
+        value: ${{ jobs.pre-build.outputs.sandbox_enabled }}
+      production_enabled:
+        description: 'Production deployment enabled flag (post branch gating)'
+        value: ${{ jobs.pre-build.outputs.production_enabled }}
+      deploy_envs_json:
+        description: 'JSON array of environments to deploy this run'
+        value: ${{ jobs.pre-build.outputs.deploy_envs_json }}
+      services_build_matrix:
+        description: 'Rich docker build matrix with per-service settings'
+        value: ${{ jobs.pre-build.outputs.services_build_matrix }}
+jobs:
+  pre-build:
+    outputs:
+      version: ${{ steps.normalize-version.outputs.version_oci }}
+      version_oci: ${{ steps.normalize-version.outputs.version_oci }}
+      service_name: ${{ steps.set-config.outputs.service_name }}
+      deploy_service_name: ${{ steps.set-config.outputs.deploy_service_name }}
+      components_json: ${{ steps.adjust-config.outputs.components_json }}
+      deploy_env: ${{ steps.map-env.outputs.deploy_env }}
+      services_matrix: ${{ steps.parse-yaml.outputs.services_matrix }}
+      services_json: ${{ steps.service-map.outputs.services_json }}
+      service_repo_map_json: ${{ steps.service-map.outputs.service_repo_map_json }}
+      service_alias_map_json: ${{ steps.service-map.outputs.service_alias_map_json }}
+      service_registry_map_json: ${{ steps.service-map.outputs.service_registry_map_json }}
+      ecr_url: ${{ steps.export-config-outputs.outputs.ecr_url }}
+      ecr_region: ${{ steps.export-config-outputs.outputs.ecr_region }}
+      role_arn: ${{ steps.export-config-outputs.outputs.role_arn }}
+      chart_path: ${{ steps.export-config-outputs.outputs.chart_path }}
+      repository_name: ${{ steps.export-config-outputs.outputs.repository_name }}
+      release_name: ${{ steps.export-config-outputs.outputs.release_name }}
+      release_branch: ${{ steps.export-config-outputs.outputs.release_branch }}
+      dev_enabled: ${{ steps.compute-deploy-flags.outputs.dev_enabled }}
+      staging_enabled: ${{ steps.compute-deploy-flags.outputs.staging_enabled }}
+      sandbox_enabled: ${{ steps.compute-deploy-flags.outputs.sandbox_enabled }}
+      production_enabled: ${{ steps.compute-deploy-flags.outputs.production_enabled }}
+      deploy_envs_json: ${{ steps.export-deploy-envs.outputs.deploy_envs_json }}
+      services_build_matrix: ${{ steps.export-config-outputs.outputs.services_build_matrix }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Full checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check yq version
+        run: |
+          which yq
+          yq --version
+
+      - name: Parse YAML and generate outputs
+        id: parse-yaml
+        run: |
+          # Get the full .github/cicd.yaml as JSON
+          full_components_json=$(yq '.' .github/cicd.yaml -o=json | jq -c '.')
+          echo "components_json=$full_components_json" >> $GITHUB_OUTPUT
+
+          # Get the global config (config section)
+          config_json=$(yq '.config' .github/cicd.yaml -o=json | jq -c '.')
+          echo "config_json=$config_json" >> $GITHUB_OUTPUT
+
+          # Get all root keys except 'config'
+          services=$(yq 'keys | .[] | select(. != "config")' .github/cicd.yaml)
+
+          # Create a simple array of service names for matrix
+          services_array=$(echo "$services" | jq -R -s -c 'split("\n")[:-1]')
+          echo "services_matrix=$services_array" >> $GITHUB_OUTPUT
+
+      - name: Set config from parsed data
+        id: set-config
+        run: |
+          # Get the global config
+          global_config='${{ steps.parse-yaml.outputs.config_json }}'
+
+          if [[ -z "$global_config" || "$global_config" == "null" ]]; then
+            echo "ERROR: config_json is empty or null"
+            exit 1
+          fi
+
+          # For deployment, use the release_name from config (single helm chart approach)
+          echo "deploy_service_name=$(echo "$global_config" | jq -r '.helm.release_name // "default"')" >> $GITHUB_OUTPUT
+
+          # Get version info from global config
+          echo "major_version=$(echo "$global_config" | jq -r '.version.major // 0')" >> $GITHUB_OUTPUT
+          echo "minor_version=$(echo "$global_config" | jq -r '.version.minor // 0')" >> $GITHUB_OUTPUT
+          echo "release_branch=$(echo "$global_config" | jq -r '.version.release_branch // "main"')" >> $GITHUB_OUTPUT
+
+      - name: Compute version
+        id: compute-version
+        uses: actionsci/compute-semver@main
+        with:
+          major_version: ${{ steps.set-config.outputs.major_version }}
+          minor_version: ${{ steps.set-config.outputs.minor_version }}
+          release_branch: ${{ steps.set-config.outputs.release_branch }}
+
+      - name: Normalize version for OCI
+        id: normalize-version
+        run: |
+          raw='${{ steps.compute-version.outputs.version }}'
+          # Lowercase for OCI compatibility
+          norm=$(echo "$raw" | tr '[:upper:]' '[:lower:]')
+          echo "version_oci=$norm" >> $GITHUB_OUTPUT
+
+      - name: Display version
+        run: |
+          echo "Version (sanitized) is ${{ steps.normalize-version.outputs.version_oci }}"
+
+      - name: Adjust deployment config based on branch
+        id: adjust-config
+        run: |
+          # Get the current branch and release branch
+          current_branch=$(git rev-parse --abbrev-ref HEAD)
+          release_branch=$(echo '${{ steps.parse-yaml.outputs.config_json }}' | jq -r '.version.release_branch // "main"')
+
+          # Get the original components JSON
+          original_json='${{ steps.parse-yaml.outputs.components_json }}'
+
+          # If we're not on the release branch, disable production deployment
+          if [[ "$current_branch" != "$release_branch" ]]; then
+            echo "Not on release branch ($release_branch), disabling production deployment"
+            adjusted_json=$(echo "$original_json" | jq -c '.config.deploy.environments.production = false')
+          else
+            echo "On release branch ($release_branch), keeping production deployment as configured"
+            adjusted_json="$original_json"
+          fi
+
+          echo "components_json=$adjusted_json" >> $GITHUB_OUTPUT
+
+      - name: Compute services and repo map
+        id: service-map
+        run: |
+          components='${{ steps.parse-yaml.outputs.components_json }}'
+          # Services JSON array
+          services_json=$(echo "$components" | jq -c '[keys[] | select(. != "config")]')
+          echo "services_json=$services_json" >> $GITHUB_OUTPUT
+          # Map service key -> image.repository_name (fallback to key if missing)
+          repo_map=$(echo "$components" | jq -c 'to_entries | map(select(.key!="config")) | map({key: .key, value: (.value.image.repository_name // .key)}) | from_entries')
+          echo "service_repo_map_json=$repo_map" >> $GITHUB_OUTPUT
+          # Map service key -> helm alias (allow override via .helm.alias, else derive suffix of service key)
+          alias_map=$(echo "$components" | jq -c 'to_entries | map(select(.key!="config")) | map({key: .key, value: (.value.helm.alias // (.key | split("-") | last))}) | from_entries')
+          echo "service_alias_map_json=$alias_map" >> $GITHUB_OUTPUT
+          # Map service key -> registry (prefer per-service aws.ecr_url; fallback to global config.helm.aws.ecr_url)
+          global_ecr=$(echo "$components" | jq -r '.config.helm.aws.ecr_url // empty')
+          registry_map=$(echo "$components" | jq -c --arg def "$global_ecr" 'to_entries | map(select(.key!="config")) | map({key: .key, value: (.value.aws.ecr_url // $def)}) | from_entries')
+          echo "service_registry_map_json=$registry_map" >> $GITHUB_OUTPUT
+
+      - name: Set deploy environment
+        id: map-env
+        run: |
+          # Simply use the requested environment directly - no mapping needed
+          requested_env='${{ inputs.env }}'
+          echo "deploy_env=$requested_env" >> $GITHUB_OUTPUT
+
+      - name: Export config outputs for downstream jobs
+        id: export-config-outputs
+        run: |
+          components='${{ steps.adjust-config.outputs.components_json }}'
+          config=$(echo "$components" | jq -c '.config')
+          echo "ecr_url=$(echo "$config" | jq -r '.helm.aws.ecr_url')" >> $GITHUB_OUTPUT
+          echo "ecr_region=$(echo "$config" | jq -r '.helm.aws.ecr_region')" >> $GITHUB_OUTPUT
+          echo "role_arn=$(echo "$config" | jq -r '.helm.aws.role_arn')" >> $GITHUB_OUTPUT
+          echo "chart_path=$(echo "$config" | jq -r '.helm.chart_path')" >> $GITHUB_OUTPUT
+          echo "repository_name=$(echo "$config" | jq -r '.helm.repository_name')" >> $GITHUB_OUTPUT
+          echo "release_name=$(echo "$config" | jq -r '.helm.release_name')" >> $GITHUB_OUTPUT
+          echo "release_branch=$(echo "$config" | jq -r '.version.release_branch // "main"')" >> $GITHUB_OUTPUT
+          # Raw config env flags
+          echo "config_dev_enabled=$(echo "$components" | jq -r '.config.deploy.environments.dev // false')" >> $GITHUB_OUTPUT
+          echo "config_staging_enabled=$(echo "$components" | jq -r '.config.deploy.environments.staging // false')" >> $GITHUB_OUTPUT
+          echo "config_sandbox_enabled=$(echo "$components" | jq -r '.config.deploy.environments.sandbox // false')" >> $GITHUB_OUTPUT
+          echo "config_production_enabled=$(echo "$components" | jq -r '.config.deploy.environments.production // false')" >> $GITHUB_OUTPUT
+          services_matrix=$(echo "$components" | jq -c '
+            to_entries
+            | map(select(.key!="config"))
+            | map({
+                service: .key,
+                repository_name: (.value.image.repository_name // .key),
+                dockerfile: (.value.docker.dockerfile // "Dockerfile"),
+                context: (.value.docker.context // "."),
+                push: (.value.docker.push // false),
+                build_args: ((.value.docker.build_args // {})
+                  | to_entries
+                  | map("\(.key)=\(.value)")
+                  | join("\n"))
+              })')
+          echo "services_build_matrix=$services_matrix" >> $GITHUB_OUTPUT
+
+      - name: Compute deploy flags per environment
+        id: compute-deploy-flags
+        uses: actions/github-script@v7
+        env:
+          RELEASE_BRANCH: ${{ steps.export-config-outputs.outputs.release_branch }}
+          COMPONENTS_JSON: ${{ steps.adjust-config.outputs.components_json }}
+        with:
+          script: |
+            const releaseBranch = process.env.RELEASE_BRANCH || 'main';
+            const components = JSON.parse(process.env.COMPONENTS_JSON || '{}');
+            const envs = components?.config?.deploy?.environments || {};
+
+            const isPR = context.eventName === 'pull_request';
+            const isDispatch = context.eventName === 'workflow_dispatch';
+            const ref = context.ref || '';
+            const branch = ref.replace('refs/heads/', '');
+
+            let deploy = { dev: false, staging: false, sandbox: false, production: false };
+
+            // If no environments are enabled at all, return all false
+            const anyEnabled = Boolean(envs.dev || envs.staging || envs.sandbox || envs.production);
+            if (!anyEnabled) {
+              core.setOutput('dev_enabled', 'false');
+              core.setOutput('staging_enabled', 'false');
+              core.setOutput('sandbox_enabled', 'false');
+              core.setOutput('production_enabled', 'false');
+              return;
+            }
+
+            if (branch === releaseBranch) {
+              // On release branch: only production (if enabled)
+              deploy.production = envs.production === true;
+            } else if (isPR) {
+              // On PRs: deploy to any enabled non-production envs
+              deploy.dev = envs.dev === true;
+              deploy.staging = envs.staging === true;
+              deploy.sandbox = envs.sandbox === true;
+            } else if (isDispatch) {
+              // For manual dispatch, respect requested env input if present
+              const requestedEnv = context.payload?.inputs?.env;
+              if (requestedEnv === 'production') {
+                deploy.production = envs.production === true && branch === releaseBranch;
+              } else if (requestedEnv === 'dev' || requestedEnv === 'staging' || requestedEnv === 'sandbox') {
+                // Never deploy non-prod on release branch
+                if (branch !== releaseBranch) {
+                  deploy[requestedEnv] = envs[requestedEnv] === true;
+                }
+              }
+            } // else: leave all false
+
+            core.setOutput('dev_enabled', String(deploy.dev));
+            core.setOutput('staging_enabled', String(deploy.staging));
+            core.setOutput('sandbox_enabled', String(deploy.sandbox));
+            core.setOutput('production_enabled', String(deploy.production));
+
+      - name: Export deploy envs array
+        id: export-deploy-envs
+        env:
+          DEV_FLAG: ${{ steps.compute-deploy-flags.outputs.dev_enabled }}
+          STAGING_FLAG: ${{ steps.compute-deploy-flags.outputs.staging_enabled }}
+          SANDBOX_FLAG: ${{ steps.compute-deploy-flags.outputs.sandbox_enabled }}
+          PROD_FLAG: ${{ steps.compute-deploy-flags.outputs.production_enabled }}
+        run: |
+          arr=()
+          [ "$DEV_FLAG" = "true" ] && arr+=("\"dev\"")
+          [ "$STAGING_FLAG" = "true" ] && arr+=("\"staging\"")
+          [ "$SANDBOX_FLAG" = "true" ] && arr+=("\"sandbox\"")
+          [ "$PROD_FLAG" = "true" ] && arr+=("\"production\"")
+          json=$(printf '[%s]' "$(IFS=,; echo "${arr[*]}")")
+          echo "deploy_envs_json=$json" >> $GITHUB_OUTPUT
+
+      - name: Pre-build Summary
+        run: |
+          echo "## Pre-build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "**Release branch:** \`${{ steps.export-config-outputs.outputs.release_branch }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** \`${{ steps.normalize-version.outputs.version_oci }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Helm chart path:** \`${{ steps.export-config-outputs.outputs.chart_path }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Release name:** \`${{ steps.export-config-outputs.outputs.release_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**ECR:** \`${{ steps.export-config-outputs.outputs.ecr_url }}\` (region: \`${{ steps.export-config-outputs.outputs.ecr_region }}\`)" >> $GITHUB_STEP_SUMMARY
+          echo "**Services:** \`${{ steps.service-map.outputs.services_json }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Deploy envs this run:** \`${{ steps.export-deploy-envs.outputs.deploy_envs_json }}\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Determine deployability (log-only)
+        id: deploy
+        uses: actions/github-script@v7
+        env:
+          COMPONENTS_CONFIG: ${{ steps.parse-yaml.outputs.config_json }}
+        with:
+          script: |
+            const componentsConfig = process.env.COMPONENTS_CONFIG;
+            const config = JSON.parse(componentsConfig);
+            const environments = (config.deploy || {}).environments || {};
+            const releaseBranch = config.version?.release_branch || 'main';
+
+            let willDeploy = false;
+            if (context.eventName === 'push' && context.ref === `refs/heads/${releaseBranch}`) {
+              willDeploy = environments.production === true;
+            } else if (context.eventName === 'pull_request') {
+              willDeploy = environments.dev === true || environments.staging === true || environments.sandbox === true;
+            } else if (context.eventName === 'workflow_dispatch') {
+              const requestedEnv = context.payload?.inputs?.env;
+              if (requestedEnv === 'production') {
+                willDeploy = environments.production === true && context.ref === `refs/heads/${releaseBranch}`;
+              } else if (requestedEnv === 'dev' || requestedEnv === 'staging' || requestedEnv === 'sandbox') {
+                willDeploy = environments[requestedEnv] === true && !context.ref.endsWith(`/${releaseBranch}`);
+              }
+            }
+            core.info(`willDeploy(any): ${willDeploy}`);
