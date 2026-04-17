@@ -1,0 +1,25 @@
+name: Build EKS PR Test
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/build-eks.yaml'
+      - '.github/workflows/pre-build.yaml'
+      - '.github/workflows/docker-build-push.yaml'
+      - '.github/workflows/docker_build_push.yaml'
+      - '.github/workflows/helm_package_push.yaml'
+      - '.github/workflows/service-deployment-gitops.yaml'
+      - '.github/workflows/build-eks-pr-test.yaml'
+
+concurrency:
+  group: build-eks-pr-test-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  build-eks:
+    name: Exercise build-eks against GitOps (sandbox)
+    uses: ./.github/workflows/build-eks.yaml
+    with:
+      env: sandbox
+      ref: ${{ github.event.pull_request.head.sha }}
+    secrets: inherit
