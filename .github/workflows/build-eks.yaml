@@ -10,6 +10,11 @@ on:
         description: 'Git ref (branch or tag) to deploy'
         required: false
         type: string
+      target_branch:
+        description: 'Branch in ActionsCI/gitops to commit to (default main)'
+        required: false
+        type: string
+        default: ''
     secrets:
       inherit: {}
   workflow_dispatch:
@@ -35,6 +40,11 @@ on:
         required: false
         type: string
         default: 'main'
+      target_branch:
+        description: 'Branch in ActionsCI/gitops to commit to (default main)'
+        required: false
+        type: string
+        default: ''
 
 jobs:
   pre-build:
@@ -98,6 +108,7 @@ jobs:
       service: ${{ needs.pre-build.outputs.release_name }}
       helmTag: ${{ needs.pre-build.outputs.version_oci }}
       env: ${{ matrix.env }}
+      target_branch: ${{ inputs.target_branch || 'main' }}
     secrets:
       GH_TOKEN: ${{ secrets.ACTIONS_CI_GITHUB_TOKEN }}
 
