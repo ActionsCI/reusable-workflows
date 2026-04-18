@@ -16,6 +16,11 @@ on:
         required: false
         type: string
         default: ''
+      test_mode:
+        description: 'Skip docker-build-push and helm-package-push (used by PR smoke)'
+        required: false
+        type: boolean
+        default: false
     secrets:
       inherit: {}
   workflow_dispatch:
@@ -46,6 +51,11 @@ on:
         required: false
         type: string
         default: ''
+      test_mode:
+        description: 'Skip docker-build-push and helm-package-push'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   pre-build:
@@ -56,6 +66,7 @@ jobs:
 
   docker-build-push:
     name: Docker Build and Push
+    if: ${{ !inputs.test_mode }}
     needs:
       - pre-build
     strategy:
@@ -78,6 +89,7 @@ jobs:
 
   helm-package-push:
     name: Package and Publish Helm Chart
+    if: ${{ !inputs.test_mode }}
     needs:
       - pre-build
       - docker-build-push
@@ -100,7 +112,12 @@ jobs:
       - pre-build
       - docker-build-push
       - helm-package-push
-    if: ${{ needs.pre-build.outputs.deploy_envs_json != '[]' }}
+    if: |
+      always()
+      && needs.pre-build.result == 'success'
+      && (needs.docker-build-push.result == 'success' || needs.docker-build-push.result == 'skipped')
+      && (needs.helm-package-push.result == 'success' || needs.helm-package-push.result == 'skipped')
+      && needs.pre-build.outputs.deploy_envs_json != '[]'
     strategy:
       matrix:
         env: ${{ fromJson(needs.pre-build.outputs.deploy_envs_json) }}
