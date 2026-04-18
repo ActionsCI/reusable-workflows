@@ -1,4 +1,5 @@
 name: Build EKS App (Reusable)
+# Trivial touch to trigger build-eks-pr-test smoke (verify end-to-end). Safe to revert.
 on:
   workflow_call:
     inputs:
