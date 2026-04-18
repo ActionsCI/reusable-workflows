@@ -102,7 +102,7 @@ jobs:
             const serviceName = "${{ inputs.service }}"
             const requestedVersion = "${{ inputs.helmTag }}"
             const targetBranch = "${{ inputs.target_branch }}" || 'main'
-            const chartYaml = `service/${serviceName}/${envName}/Chart.yaml`
+            const valuesYaml = `service/${serviceName}/${envName}/values.yaml`
 
             if (targetBranch !== 'main') {
               $`git checkout -B ${targetBranch} origin/main`
@@ -116,7 +116,7 @@ jobs:
                 `**Service:** \`${serviceName}\``,
                 `**Environment:** \`${envName}\``,
                 `**Target branch:** \`${targetBranch}\``,
-                `**GitOps Path:** \`${chartYaml}\``,
+                `**GitOps Path:** \`${valuesYaml}\``,
                 statusLine,
                 ...extras,
                 ''
@@ -124,49 +124,48 @@ jobs:
               fs.appendFileSync(summary, lines.join('\n'))
             }
 
-            const readVersion = async () => {
+            const readTag = async () => {
               try {
-                return (await $`yq -r '.dependencies[] | select(.alias=="service") | .version' ${chartYaml}`).stdout.trim()
+                return (await $`yq -r '.image.tag // ""' ${valuesYaml}`).stdout.trim()
               } catch { return '' }
             }
 
-            const aliasExists = async () => {
+            const tagFieldExists = async () => {
               try {
-                const out = (await $`yq -r '[.dependencies[] | select(.alias=="service")] | length' ${chartYaml}`).stdout.trim()
-                const n = parseInt(out, 10)
-                return Number.isFinite(n) && n > 0
+                const out = (await $`yq -r 'has("image") and (.image | has("tag"))' ${valuesYaml}`).stdout.trim()
+                return out === 'true'
               } catch { return false }
             }
 
-            if (!fs.existsSync(chartYaml)) {
-              console.warn(chalk.yellow(`GitOps path not found: ${chartYaml}.`))
+            if (!fs.existsSync(valuesYaml)) {
+              console.warn(chalk.yellow(`GitOps path not found: ${valuesYaml}.`))
               writeSummary('**Status:** ⚠️ Skipped (GitOps path missing)')
               process.exit(0)
             }
 
-            if (!(await aliasExists())) {
-              console.warn(chalk.yellow(`No dependency with alias 'service' found in ${chartYaml}.`))
-              writeSummary("**Status:** ⚠️ Skipped (no 'service' dependency in Chart.yaml)")
+            if (!(await tagFieldExists())) {
+              console.warn(chalk.yellow(`No .image.tag field in ${valuesYaml}.`))
+              writeSummary("**Status:** ⚠️ Skipped (no '.image.tag' in values.yaml)")
               process.exit(0)
             }
 
-            const currentVersion = await readVersion()
+            const currentVersion = await readTag()
             if (currentVersion === requestedVersion) {
               writeSummary('**Status:** ✅ Version confirmed (no commit needed)', [
-                `**Old version:** \`${currentVersion}\``,
-                `**New version:** \`${requestedVersion}\``
+                `**Old tag:** \`${currentVersion}\``,
+                `**New tag:** \`${requestedVersion}\``
               ])
               process.exit(0)
             }
 
             // Write requested version (in-place)
-            $`yq '(.dependencies[] | select(.alias == "service")).version = "${requestedVersion}"' -i "${chartYaml}"`
+            $`yq '.image.tag = "${requestedVersion}"' -i "${valuesYaml}"`
 
             // Verify the file now contains the requested version
-            const newVersion = await readVersion()
+            const newVersion = await readTag()
             if (newVersion !== requestedVersion) {
-              writeSummary('**Status:** ⚠️ Requested version not applied', [
-                `**Old version:** \`${currentVersion}\``,
+              writeSummary('**Status:** ⚠️ Requested tag not applied', [
+                `**Old tag:** \`${currentVersion}\``,
                 `**Requested:** \`${requestedVersion}\``,
                 `**Observed:** \`${newVersion}\``
               ])
@@ -179,8 +178,8 @@ jobs:
               $`! git diff --exit-code`
             } catch {
               writeSummary('**Status:** ✅ Version confirmed (no commit needed)', [
-                `**Old version:** \`${currentVersion}\``,
-                `**New version:** \`${newVersion}\``
+                `**Old tag:** \`${currentVersion}\``,
+                `**New tag:** \`${newVersion}\``
               ])
               process.exit(0)
             }
@@ -188,7 +187,7 @@ jobs:
             // Commit and push changes
             $`git config --global user.name "ActionsCI"`
             $`git config --global user.email "ActionsCI@burnin-media.com"`
-            $`git add ${chartYaml}`
+            $`git add ${valuesYaml}`
             $`git commit -m"CD - Deploy ${serviceName}:${requestedVersion} to ${envName}"`
 
             if (targetBranch === 'main') {
@@ -202,8 +201,8 @@ jobs:
             }
 
             writeSummary('**Status:** ✅ Deployed successfully', [
-              `**Old version:** \`${currentVersion}\``,
-              `**New version:** \`${newVersion}\``
+              `**Old tag:** \`${currentVersion}\``,
+              `**New tag:** \`${newVersion}\``
             ])
           } catch (error) {
             console.error(chalk.red.bold(`${error}`));
