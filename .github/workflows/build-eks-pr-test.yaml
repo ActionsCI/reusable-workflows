@@ -23,11 +23,14 @@ on:
         type: string
 
 concurrency:
-  group: build-eks-pr-test-${{ github.event.pull_request.number || inputs.pr_number }}
+  # Global group: only one PR can smoke at a time because all PRs share the
+  # `pr-smoke` floating branch that the boilerplate caller pins to. See
+  # "Update pr-smoke branch" step below for context.
+  group: build-eks-pr-smoke
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write        # required to force-push the pr-smoke branch
   pull-requests: write
   actions: read
 
@@ -35,6 +38,7 @@ env:
   BOILERPLATE_REPO: ActionsCI/django-angular-boilerplate
   SMOKE_WORKFLOW: pr-smoke-build-eks.yaml
   GITOPS_REPO: ActionsCI/gitops
+  SMOKE_BRANCH: pr-smoke
 
 jobs:
   dispatch-smoke:
@@ -74,20 +78,41 @@ jobs:
             django-angular-boilerplate
             gitops
 
+      - name: Update pr-smoke branch to PR head SHA
+        # The boilerplate's pr-smoke-build-eks.yaml pins its reusable-workflow
+        # ref to a literal `@pr-smoke` because GitHub does not allow
+        # expressions in a reusable workflow's `uses:` ref. We fast-forward
+        # the pr-smoke branch to this PR's head SHA right before dispatching
+        # so the smoke exercises the PR's exact code. Global concurrency
+        # above serializes smokes so the branch always points at the PR
+        # currently under test.
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          echo "Force-updating refs/heads/${SMOKE_BRANCH} -> ${HEAD_SHA}"
+          # PATCH succeeds if ref exists; POST creates it if missing.
+          if ! gh api -X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/heads/${SMOKE_BRANCH}" \
+                 -F "sha=${HEAD_SHA}" -F "force=true" 2>/dev/null; then
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -F "ref=refs/heads/${SMOKE_BRANCH}" \
+              -F "sha=${HEAD_SHA}"
+          fi
+
       - name: Dispatch smoke workflow in boilerplate
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
           echo "Dispatching ${SMOKE_WORKFLOW} in ${BOILERPLATE_REPO}"
-          echo "  reusable_workflows_ref=${HEAD_SHA}"
           echo "  pr_number=${PR_NUMBER}"
           echo "  caller_run_id=${CALLER_RUN_ID}"
+          echo "  (reusable-workflows ref pinned in the caller to @${SMOKE_BRANCH},"
+          echo "   which was just updated to ${HEAD_SHA})"
           gh api \
             -X POST \
             "repos/${BOILERPLATE_REPO}/actions/workflows/${SMOKE_WORKFLOW}/dispatches" \
             -f "ref=main" \
-            -f "inputs[reusable_workflows_ref]=${HEAD_SHA}" \
             -f "inputs[pr_number]=${PR_NUMBER}" \
             -f "inputs[caller_run_id]=${CALLER_RUN_ID}"
 
@@ -154,7 +179,7 @@ jobs:
             echo "## build-eks PR smoke"
             echo ""
             echo "- PR: #${PR_NUMBER}"
-            echo "- reusable-workflows SHA tested: \`${HEAD_SHA}\`"
+            echo "- pr-smoke branch pinned to: \`${HEAD_SHA}\`"
             echo "- Dispatched run: ${{ steps.locate.outputs.run_url }}"
             echo "- Conclusion: \`${{ steps.wait.outputs.conclusion }}\`"
             echo "- GitOps throwaway branch: https://github.com/${GITOPS_REPO}/tree/pr-test/${PR_NUMBER}"
