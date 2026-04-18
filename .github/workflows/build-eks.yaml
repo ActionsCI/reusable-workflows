@@ -49,7 +49,7 @@ on:
 
 jobs:
   pre-build:
-    uses: actionsci/reusable-workflows/.github/workflows/pre-build.yaml
+    uses: ./.github/workflows/pre-build.yaml
     with:
       env: ${{ github.event.inputs.env || '' }}
       ref: ${{ github.event.inputs.ref || '' }}
@@ -61,7 +61,7 @@ jobs:
     strategy:
       matrix:
         include: ${{ fromJson(needs.pre-build.outputs.services_build_matrix) }}
-    uses: actionsci/reusable-workflows/.github/workflows/docker-build-push.yaml
+    uses: ./.github/workflows/docker_build_push.yaml
     with:
       service_name: ${{ matrix.service }}
       image_tag: ${{ needs.pre-build.outputs.version_oci }}
@@ -81,7 +81,7 @@ jobs:
     needs:
       - pre-build
       - docker-build-push
-    uses:  actionsci/reusable-workflows/.github/workflows/package-helm.yaml
+    uses: ./.github/workflows/helm_package_push.yaml
     with:
       version: ${{ needs.pre-build.outputs.version_oci }}
       ecr_url: ${{ needs.pre-build.outputs.ecr_url }}
@@ -104,7 +104,7 @@ jobs:
     strategy:
       matrix:
         env: ${{ fromJson(needs.pre-build.outputs.deploy_envs_json) }}
-    uses: actionsci/reusable-workflows/.github/workflows/service-deployment-gitops.yaml
+    uses: ./.github/workflows/service-deployment-gitops.yaml
     with:
       service: ${{ needs.pre-build.outputs.release_name }}
       helmTag: ${{ needs.pre-build.outputs.version_oci }}
@@ -120,6 +120,6 @@ jobs:
       - docker-build-push
       - helm-package-push
       - deploy
-    uses: actionsci/actions-reusable-workflows/.github/workflows/success-check.yaml
+    uses: ./.github/workflows/success-check.yaml
     with:
       jobs: ${{ toJson(needs) }}
