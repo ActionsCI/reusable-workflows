@@ -22,7 +22,14 @@ on:
         default: 'main'
     secrets:
       GH_TOKEN:
-        required: true
+        description: Pre-minted token with write access to ActionsCI/gitops. If omitted, CI_APP_ID + CI_APP_PRIVATE_KEY must be provided and a short-lived App token will be minted in-job.
+        required: false
+      CI_APP_ID:
+        description: GitHub App ID. Used only when GH_TOKEN is not provided.
+        required: false
+      CI_APP_PRIVATE_KEY:
+        description: Base64-encoded GitHub App private key. Used only when GH_TOKEN is not provided.
+        required: false
 
 jobs:
   service-deployment:
@@ -32,10 +39,53 @@ jobs:
     env:
       FORCE_COLOR: 1
     steps:
+      - name: Select auth mode
+        id: auth-mode
+        env:
+          PROVIDED_TOKEN: ${{ secrets.GH_TOKEN }}
+          APP_ID: ${{ secrets.CI_APP_ID }}
+          APP_KEY_B64: ${{ secrets.CI_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "$PROVIDED_TOKEN" ]; then
+            echo "mode=provided" >> "$GITHUB_OUTPUT"
+          elif [ -n "$APP_ID" ] && [ -n "$APP_KEY_B64" ]; then
+            echo "mode=app" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Neither GH_TOKEN nor CI_APP_ID+CI_APP_PRIVATE_KEY was supplied to service-deployment-gitops.yaml."
+            exit 1
+          fi
+
+      - name: Decode App private key (base64)
+        if: steps.auth-mode.outputs.mode == 'app'
+        env:
+          APP_KEY_B64: ${{ secrets.CI_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          decoded=$(printf '%s' "$APP_KEY_B64" | base64 -d)
+          while IFS= read -r line; do
+            [ -n "$line" ] && echo "::add-mask::$line"
+          done <<< "$decoded"
+          {
+            echo "APP_PRIVATE_KEY<<EOF_APP_KEY"
+            printf '%s\n' "$decoded"
+            echo "EOF_APP_KEY"
+          } >> "$GITHUB_ENV"
+
+      - name: Mint App installation token
+        id: app-token
+        if: steps.auth-mode.outputs.mode == 'app'
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ env.APP_PRIVATE_KEY }}
+          owner: ActionsCI
+          repositories: gitops
+
       - name: Checkout gitops repo
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
         with:
-          token: ${{ secrets.GH_TOKEN }}
+          token: ${{ steps.app-token.outputs.token || secrets.GH_TOKEN }}
           repository: ActionsCI/gitops
           fetch-depth: 0
       - name: Update the tag (idempotent, with summary)

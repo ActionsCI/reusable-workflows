@@ -3,18 +3,65 @@ name: Package Helm Chart and Push
 on:
   workflow_call:
     inputs:
+      # Legacy username/password contract (original)
       helm_chart_directory:
         description: 'The directory of the Helm chart'
-        required: true
+        required: false
         type: string
+        default: ''
       helm_repo_username:
         description: 'The username for the Helm repository'
-        required: true
+        required: false
         type: string
+        default: ''
       helm_repo_password:
         description: 'The password for the Helm repository'
-        required: true
+        required: false
         type: string
+        default: ''
+      # ECR/OIDC inputs passed by build-eks.yaml. Accepted but unused by
+      # this legacy workflow; declared here so the build-eks graph parses.
+      # Real ECR helm-package-push is TODO (tracked separately).
+      version:
+        required: false
+        type: string
+        default: ''
+      ecr_url:
+        required: false
+        type: string
+        default: ''
+      ecr_region:
+        required: false
+        type: string
+        default: ''
+      role_arn:
+        required: false
+        type: string
+        default: ''
+      chart_path:
+        required: false
+        type: string
+        default: ''
+      repository_name:
+        required: false
+        type: string
+        default: ''
+      services_json:
+        required: false
+        type: string
+        default: ''
+      service_repo_map_json:
+        required: false
+        type: string
+        default: ''
+      service_alias_map_json:
+        required: false
+        type: string
+        default: ''
+      service_registry_map_json:
+        required: false
+        type: string
+        default: ''
 
 jobs:
   package:
