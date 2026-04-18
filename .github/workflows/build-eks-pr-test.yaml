@@ -2,21 +2,24 @@ name: Build EKS PR Test
 
 # Direct PR smoke for service-deployment-gitops.yaml.
 #
-# Why we are not dispatching the boilerplate anymore: the full build-eks.yaml
-# chain depends on ECR-flavored docker-build-push and helm-package-push
-# reusable workflows that do not exist in this repo yet. Until those land,
-# the only part of the pipeline that's both real and touches external state
-# is service-deployment-gitops.yaml. This workflow exercises it directly
-# against a throwaway pr-test/<pr-number> branch in ActionsCI/gitops, which
-# is the actual behavior we want to guard in a PR.
+# We do NOT dispatch the boilerplate or try to run the full build-eks chain:
+# the ECR-flavored docker-build-push and helm-package-push reusable workflows
+# that build-eks.yaml references are stubs, so the only functional surface of
+# the EKS pipeline today is service-deployment-gitops.yaml. This smoke calls
+# it directly with the PR's version via a same-repo `uses:` and writes to a
+# throwaway pr-test/<pr-number> branch in ActionsCI/gitops.
 #
-# Prerequisite fixture (one-time setup in ActionsCI/gitops on main):
-#   service/pr-smoke/sandbox/Chart.yaml must exist and declare a
-#   `dependencies[]` entry with `alias: service`. Without it,
-#   service-deployment-gitops.yaml skips with "Status: Skipped (GitOps path
-#   missing)" and this workflow reports a false-positive green. The
-#   verify-commit job below defends against that by asserting the pr-test
-#   branch is actually ahead of main after the smoke runs.
+# Auth: service-deployment-gitops.yaml mints its own short-lived App
+# installation token from CI_APP_ID + CI_APP_PRIVATE_KEY (declared as
+# accepted secrets on that workflow). We propagate them via
+# `secrets: inherit`. We do NOT mint a token in this file and pass it as
+# a job output - GitHub masks App-minted tokens and the redacted value
+# arrives as empty string on the other side.
+#
+# Prerequisite fixture on ActionsCI/gitops@main:
+#   service/pr-smoke/sandbox/Chart.yaml with a `dependencies[]` entry
+#   aliased `service`. Without it the reusable workflow takes the
+#   "Skipped (GitOps path missing)" exit; verify-commit catches that.
 
 on:
   pull_request:
@@ -45,14 +48,26 @@ env:
   SMOKE_ENV: sandbox
 
 jobs:
-  mint-token:
+  gitops-smoke:
     if: github.event.action != 'closed'
-    name: Mint GitHub App installation token
+    name: Exercise service-deployment-gitops against pr-test/<n>
+    uses: ./.github/workflows/service-deployment-gitops.yaml
+    with:
+      service: pr-smoke
+      env: sandbox
+      helmTag: 0.0.0-pr${{ github.event.pull_request.number || inputs.pr_number }}-${{ github.event.pull_request.head.sha || github.sha }}
+      target_branch: pr-test/${{ github.event.pull_request.number || inputs.pr_number }}
+    secrets: inherit
+
+  verify-commit:
+    if: github.event.action != 'closed'
+    name: Verify pr-test branch actually got a new commit
+    needs: gitops-smoke
     runs-on: ubuntu-24.04
-    outputs:
-      token: ${{ steps.app-token.outputs.token }}
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
     steps:
-      - name: Decode GitHub App private key (base64)
+      - name: Decode App private key (base64)
         env:
           APP_KEY_B64: ${{ secrets.CI_APP_PRIVATE_KEY }}
         run: |
@@ -67,7 +82,7 @@ jobs:
             echo "EOF_APP_KEY"
           } >> "$GITHUB_ENV"
 
-      - name: Mint token
+      - name: Mint App token
         id: app-token
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
         with:
@@ -76,29 +91,9 @@ jobs:
           owner: ActionsCI
           repositories: gitops
 
-  gitops-smoke:
-    if: github.event.action != 'closed'
-    name: Exercise service-deployment-gitops against pr-test/<n>
-    needs: mint-token
-    uses: ./.github/workflows/service-deployment-gitops.yaml
-    with:
-      service: pr-smoke
-      env: sandbox
-      helmTag: 0.0.0-pr${{ github.event.pull_request.number || inputs.pr_number }}-${{ github.event.pull_request.head.sha || github.sha }}
-      target_branch: pr-test/${{ github.event.pull_request.number || inputs.pr_number }}
-    secrets:
-      GH_TOKEN: ${{ needs.mint-token.outputs.token }}
-
-  verify-commit:
-    if: github.event.action != 'closed'
-    name: Verify pr-test branch actually got a new commit
-    needs: [mint-token, gitops-smoke]
-    runs-on: ubuntu-24.04
-    env:
-      GH_TOKEN: ${{ needs.mint-token.outputs.token }}
-      PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
-    steps:
       - name: Confirm pr-test/${{ github.event.pull_request.number || inputs.pr_number }} is ahead of main
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
           branch="pr-test/${PR_NUMBER}"
@@ -126,7 +121,7 @@ jobs:
     name: Delete throwaway GitOps branch
     runs-on: ubuntu-24.04
     steps:
-      - name: Decode GitHub App private key (base64)
+      - name: Decode App private key (base64)
         env:
           APP_KEY_B64: ${{ secrets.CI_APP_PRIVATE_KEY }}
         run: |
@@ -141,7 +136,7 @@ jobs:
             echo "EOF_APP_KEY"
           } >> "$GITHUB_ENV"
 
-      - name: Mint token
+      - name: Mint App token
         id: app-token
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
         with:
