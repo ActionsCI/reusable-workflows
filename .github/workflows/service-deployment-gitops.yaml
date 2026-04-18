@@ -1,5 +1,6 @@
 name: __ Service Deployment (reusable workflow)
 
+# Trivial touch to re-exercise build-eks-pr-test post-merge. Safe to revert.
 on:
   workflow_call:
     inputs:
