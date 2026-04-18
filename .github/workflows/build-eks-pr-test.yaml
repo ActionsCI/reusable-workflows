@@ -1,0 +1,206 @@
+name: Build EKS PR Test
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+    paths:
+      - '.github/workflows/build-eks.yaml'
+      - '.github/workflows/pre-build.yaml'
+      - '.github/workflows/docker-build-push.yaml'
+      - '.github/workflows/docker_build_push.yaml'
+      - '.github/workflows/helm_package_push.yaml'
+      - '.github/workflows/service-deployment-gitops.yaml'
+      - '.github/workflows/build-eks-pr-test.yaml'
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to re-run smoke for'
+        required: true
+        type: string
+      head_sha:
+        description: 'SHA of this repo to exercise'
+        required: true
+        type: string
+
+concurrency:
+  group: build-eks-pr-test-${{ github.event.pull_request.number || inputs.pr_number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  actions: read
+
+env:
+  BOILERPLATE_REPO: ActionsCI/django-angular-boilerplate
+  SMOKE_WORKFLOW: pr-smoke-build-eks.yaml
+  GITOPS_REPO: ActionsCI/gitops
+
+jobs:
+  dispatch-smoke:
+    if: github.event.action != 'closed'
+    name: Dispatch build-eks smoke against django-angular-boilerplate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha || inputs.head_sha }}
+      CALLER_RUN_ID: ${{ github.run_id }}
+    steps:
+      - name: Decode GitHub App private key (base64)
+        env:
+          APP_KEY_B64: ${{ secrets.CI_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          decoded=$(printf '%s' "$APP_KEY_B64" | base64 -d)
+          # Mask each non-empty line so the PEM cannot surface in logs
+          while IFS= read -r line; do
+            [ -n "$line" ] && echo "::add-mask::$line"
+          done <<< "$decoded"
+          {
+            echo "APP_PRIVATE_KEY<<EOF_APP_KEY"
+            printf '%s\n' "$decoded"
+            echo "EOF_APP_KEY"
+          } >> "$GITHUB_ENV"
+
+      - name: Mint GitHub App installation token
+        id: app-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ env.APP_PRIVATE_KEY }}
+          owner: ActionsCI
+          repositories: |
+            django-angular-boilerplate
+            gitops
+
+      - name: Dispatch smoke workflow in boilerplate
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          echo "Dispatching ${SMOKE_WORKFLOW} in ${BOILERPLATE_REPO}"
+          echo "  reusable_workflows_ref=${HEAD_SHA}"
+          echo "  pr_number=${PR_NUMBER}"
+          echo "  caller_run_id=${CALLER_RUN_ID}"
+          gh api \
+            -X POST \
+            "repos/${BOILERPLATE_REPO}/actions/workflows/${SMOKE_WORKFLOW}/dispatches" \
+            -f "ref=main" \
+            -f "inputs[reusable_workflows_ref]=${HEAD_SHA}" \
+            -f "inputs[pr_number]=${PR_NUMBER}" \
+            -f "inputs[caller_run_id]=${CALLER_RUN_ID}"
+
+      - name: Locate dispatched run
+        id: locate
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          needle="caller ${CALLER_RUN_ID}"
+          run_id=""
+          for attempt in $(seq 1 30); do
+            run_id=$(gh api \
+              "repos/${BOILERPLATE_REPO}/actions/workflows/${SMOKE_WORKFLOW}/runs?event=workflow_dispatch&per_page=20" \
+              --jq ".workflow_runs[] | select(.display_title | contains(\"${needle}\")) | .id" \
+              | head -n1)
+            if [ -n "${run_id}" ]; then
+              echo "Found run ${run_id} after ${attempt} attempt(s)"
+              break
+            fi
+            sleep 5
+          done
+          if [ -z "${run_id}" ]; then
+            echo "::error::Could not locate dispatched run carrying '${needle}' in display_title"
+            exit 1
+          fi
+          echo "run_id=${run_id}" >> "$GITHUB_OUTPUT"
+          echo "run_url=https://github.com/${BOILERPLATE_REPO}/actions/runs/${run_id}" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for dispatched run to finish
+        id: wait
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          run_id="${{ steps.locate.outputs.run_id }}"
+          deadline=$(( $(date +%s) + 1800 ))
+          status=""
+          conclusion=""
+          while [ "$(date +%s)" -lt "${deadline}" ]; do
+            read -r status conclusion < <(gh api \
+              "repos/${BOILERPLATE_REPO}/actions/runs/${run_id}" \
+              --jq '"\(.status) \(.conclusion // "null")"')
+            echo "Run ${run_id}: status=${status} conclusion=${conclusion}"
+            if [ "${status}" = "completed" ]; then
+              break
+            fi
+            sleep 15
+          done
+          echo "conclusion=${conclusion}" >> "$GITHUB_OUTPUT"
+          if [ "${status}" != "completed" ]; then
+            echo "::error::Timed out waiting for run ${run_id}"
+            exit 1
+          fi
+          if [ "${conclusion}" != "success" ]; then
+            echo "::error::Dispatched run ${run_id} concluded as ${conclusion}"
+            exit 1
+          fi
+
+      - name: Write PR summary
+        if: always()
+        run: |
+          {
+            echo "## build-eks PR smoke"
+            echo ""
+            echo "- PR: #${PR_NUMBER}"
+            echo "- reusable-workflows SHA tested: \`${HEAD_SHA}\`"
+            echo "- Dispatched run: ${{ steps.locate.outputs.run_url }}"
+            echo "- Conclusion: \`${{ steps.wait.outputs.conclusion }}\`"
+            echo "- GitOps throwaway branch: https://github.com/${GITOPS_REPO}/tree/pr-test/${PR_NUMBER}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  cleanup:
+    if: github.event.action == 'closed'
+    name: Delete throwaway GitOps branch
+    runs-on: ubuntu-24.04
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+    steps:
+      - name: Decode GitHub App private key (base64)
+        env:
+          APP_KEY_B64: ${{ secrets.CI_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          decoded=$(printf '%s' "$APP_KEY_B64" | base64 -d)
+          while IFS= read -r line; do
+            [ -n "$line" ] && echo "::add-mask::$line"
+          done <<< "$decoded"
+          {
+            echo "APP_PRIVATE_KEY<<EOF_APP_KEY"
+            printf '%s\n' "$decoded"
+            echo "EOF_APP_KEY"
+          } >> "$GITHUB_ENV"
+
+      - name: Mint GitHub App installation token
+        id: app-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ env.APP_PRIVATE_KEY }}
+          owner: ActionsCI
+          repositories: |
+            gitops
+
+      - name: Delete pr-test/${{ github.event.pull_request.number }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          ref="heads/pr-test/${PR_NUMBER}"
+          if ! gh api "repos/${GITOPS_REPO}/git/refs/${ref}" >/dev/null 2>&1; then
+            echo "Ref ${ref} not found in ${GITOPS_REPO}; nothing to clean up"
+            exit 0
+          fi
+          gh api -X DELETE "repos/${GITOPS_REPO}/git/refs/${ref}"
+          echo "Deleted ${ref} from ${GITOPS_REPO}"

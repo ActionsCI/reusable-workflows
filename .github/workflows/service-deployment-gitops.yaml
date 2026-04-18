@@ -15,6 +15,11 @@ on:
         description: Environment to deploy the service to
         required: true
         type: string
+      target_branch:
+        description: Branch in ActionsCI/gitops to commit to (default main)
+        required: false
+        type: string
+        default: 'main'
     secrets:
       GH_TOKEN:
         required: true
@@ -28,7 +33,7 @@ jobs:
       FORCE_COLOR: 1
     steps:
       - name: Checkout gitops repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
         with:
           token: ${{ secrets.GH_TOKEN }}
           repository: ActionsCI/gitops
@@ -45,7 +50,12 @@ jobs:
             const envName = "${{ inputs.env }}"
             const serviceName = "${{ inputs.service }}"
             const requestedVersion = "${{ inputs.helmTag }}"
+            const targetBranch = "${{ inputs.target_branch }}" || 'main'
             const chartYaml = `service/${serviceName}/${envName}/Chart.yaml`
+
+            if (targetBranch !== 'main') {
+              $`git checkout -B ${targetBranch} origin/main`
+            }
 
             const summary = process.env.GITHUB_STEP_SUMMARY
             const writeSummary = (statusLine, extras = []) => {
@@ -54,6 +64,7 @@ jobs:
                 '## GitOps Deployment Summary',
                 `**Service:** \`${serviceName}\``,
                 `**Environment:** \`${envName}\``,
+                `**Target branch:** \`${targetBranch}\``,
                 `**GitOps Path:** \`${chartYaml}\``,
                 statusLine,
                 ...extras,
@@ -129,9 +140,15 @@ jobs:
             $`git add ${chartYaml}`
             $`git commit -m"CD - Deploy ${serviceName}:${requestedVersion} to ${envName}"`
 
-            await retry(5, () => {
-              try { $`git push` } catch { $`git pull --rebase`; throw new Error('Push failed.') }
-            })
+            if (targetBranch === 'main') {
+              await retry(5, () => {
+                try { $`git push` } catch { $`git pull --rebase`; throw new Error('Push failed.') }
+              })
+            } else {
+              await retry(5, () => {
+                try { $`git push --force origin HEAD:${targetBranch}` } catch { throw new Error('Push failed.') }
+              })
+            }
 
             writeSummary('**Status:** ✅ Deployed successfully', [
               `**Old version:** \`${currentVersion}\``,

@@ -112,7 +112,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Full checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
         with:
           fetch-depth: 0
 
@@ -259,7 +259,7 @@ jobs:
 
       - name: Compute deploy flags per environment
         id: compute-deploy-flags
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         env:
           RELEASE_BRANCH: ${{ steps.export-config-outputs.outputs.release_branch }}
           COMPONENTS_JSON: ${{ steps.adjust-config.outputs.components_json }}
@@ -341,7 +341,7 @@ jobs:
 
       - name: Determine deployability (log-only)
         id: deploy
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         env:
           COMPONENTS_CONFIG: ${{ steps.parse-yaml.outputs.config_json }}
         with:
